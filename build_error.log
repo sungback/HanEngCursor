@@ -1,0 +1,24 @@
+﻿cargo :    Compiling windows-link v0.2.1
+At line:1 char:1
++ cargo build 2>&1 | Out-File -Encoding UTF8 build_error.log
++ ~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (   Compiling windows-link v0.2.1: 
+   String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+   Compiling win11mouse v0.1.0 (C:\Users\sam\Dropbox\Win11Mouse)
+   Compiling windows-result v0.4.1
+   Compiling windows-strings v0.5.1
+   Compiling windows-threading v0.2.1
+error[E0599]: no method named `unwrap` found for enum `CompilationResult` in th
+e current scope
+ --> build.rs:2:61
+  |
+2 |     embed_resource::compile("app.rc", embed_resource::NONE).unwrap();
+  |                                                             ^^^^^^ method n
+ot found in `CompilationResult`
+
+   Compiling windows-core v0.62.2
+For more information about this error, try `rustc --explain E0599`.
+error: could not compile `win11mouse` (build script) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

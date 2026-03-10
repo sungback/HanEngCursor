@@ -1,0 +1,37 @@
+   Compiling win11mouse v0.1.0 (C:\Users\sam\Dropbox\Win11Mouse)
+error[E0308]: arguments to this function are incorrect
+    --> src\ime.rs:74:31
+     |
+  74 |         let conversion_mode = SendMessageW(
+     |                               ^^^^^^^^^^^^
+     |
+note: expected `Option<WPARAM>`, found `WPARAM`
+    --> src\ime.rs:77:13
+     |
+  77 |             WPARAM(IMC_GETCONVERSIONMODE),
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     = note: expected enum `Option<WPARAM>`
+              found struct `WPARAM`
+note: expected `Option<LPARAM>`, found `LPARAM`
+    --> src\ime.rs:78:13
+     |
+  78 |             LPARAM(0),
+     |             ^^^^^^^^^
+     = note: expected enum `Option<LPARAM>`
+              found struct `LPARAM`
+note: function defined here
+    --> C:\Users\sam\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows-0.62.2\src\Windows\Win32\UI\WindowsAndMessaging\mod.rs:2044:15
+     |
+2044 | pub unsafe fn SendMessageW(hwnd: super::super::Foundation::HWND, msg: u32, wparam: Option<super::super::Foundation::WPARAM>, lparam: Opti...
+     |               ^^^^^^^^^^^^
+help: try wrapping the expression in `Some`
+     |
+  77 |             Some(WPARAM(IMC_GETCONVERSIONMODE)),
+     |             +++++                             +
+help: try wrapping the expression in `Some`
+     |
+  78 |             Some(LPARAM(0)),
+     |             +++++         +
+System.Management.Automation.RemoteException
+For more information about this error, try `rustc --explain E0308`.
+error: could not compile `win11mouse` (bin "win11mouse") due to 1 previous error
