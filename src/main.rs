@@ -1,5 +1,6 @@
 #![windows_subsystem = "windows"]
 
+mod catchtype;
 mod ime;
 mod overlay;
 mod tray;
@@ -20,7 +21,7 @@ use crate::tray::{TrayIcon, WM_TRAY_CALLBACK};
 // 1초에 20번 (50ms 마다) 상태를 체크하기 위한 타이머 설정값
 const TIMER_ID: usize = 1;
 const TIMER_INTERVAL_MS: u32 = 50;
-const CLASS_NAME: windows::core::PCWSTR = w!("Win11MouseMainWnd");
+const CLASS_NAME: windows::core::PCWSTR = w!("HanEngCursorMainWnd");
 
 // 프로그램 전역에 상태를 저장하는 공간 (오버레이 마술사창, 트레이 팩토리)
 // *주의: Rust에서 전역 변수는 `unsafe` 블록 안에서만 안전성을 개발자가 책임지고 써야 합니다.
@@ -35,7 +36,7 @@ fn main() {
             windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
                 None,
                 &msg,
-                w!("Win11Mouse 오류"),
+                w!("HanEngCursor 오류"),
                 windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
             );
         }
@@ -43,6 +44,9 @@ fn main() {
 }
 
 fn run() -> windows::core::Result<()> {
+    // Accessibility work runs independently from the cursor/message loop.
+    // If the optional monitor cannot start, Windows IME detection still works.
+    let _catchtype_monitor = catchtype::Monitor::start().ok();
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
 
@@ -61,7 +65,7 @@ fn run() -> windows::core::Result<()> {
         let hwnd = CreateWindowExW(
             WS_EX_TOOLWINDOW,
             CLASS_NAME,
-            w!("Win11Mouse"),
+            w!("HanEngCursor"),
             WS_OVERLAPPEDWINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
@@ -128,7 +132,11 @@ unsafe extern "system" fn main_wnd_proc(
         WM_TIMER => {
             if wparam.0 == TIMER_ID {
                 // Poll IME status and update overlay & tray
-                let mode = ime::get_ime_mode();
+                let mode = match catchtype::current_status() {
+                    Some(catchtype::Status::Korean) => ime::ImeMode::Korean,
+                    Some(catchtype::Status::English) => ime::ImeMode::English,
+                    _ => ime::get_ime_mode(),
+                };
                 if let Some(ref overlay) = OVERLAY {
                     overlay.update(mode);
                 }

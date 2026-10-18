@@ -1,8 +1,9 @@
 use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
-use windows::Win32::UI::Input::Ime::ImmGetDefaultIMEWnd;
+use windows::Win32::UI::Input::Ime::{ImmGetDefaultIMEWnd, IME_CMODE_NATIVE};
+use windows::Win32::UI::Input::KeyboardAndMouse::GetKeyboardLayout;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SendMessageW, GUITHREADINFO,
-    WM_IME_CONTROL,
+    GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, SendMessageTimeoutW,
+    GUITHREADINFO, SMTO_ABORTIFHUNG, SMTO_BLOCK, SMTO_ERRORONEXIT, WM_IME_CONTROL,
 };
 
 /// 한/영 상태를 나타내는 단순한 이름표(열거형)입니다.
@@ -15,8 +16,40 @@ pub enum ImeMode {
 /// IMC_GETCONVERSIONMODE = 0x0001 (subcommand for WM_IME_CONTROL)
 const IMC_GETCONVERSIONMODE: usize = 0x0001;
 
-/// IME_CMODE_NATIVE = 0x0001 (native/Korean input)
-const IME_CMODE_NATIVE: isize = 0x0001;
+/// WM_IME_CONTROL subcommand for the IME's open/closed state.
+const IMC_GETOPENSTATUS: usize = 0x0005;
+const IME_QUERY_TIMEOUT_MS: u32 = 20;
+const LANG_KOREAN: usize = 0x12;
+
+/// A successful query can return zero; it must not be confused with a timeout.
+fn query_ime(ime_wnd: HWND, command: usize) -> Option<usize> {
+    let mut result = 0;
+    let succeeded = unsafe {
+        SendMessageTimeoutW(
+            ime_wnd,
+            WM_IME_CONTROL,
+            WPARAM(command),
+            LPARAM(0),
+            SMTO_ABORTIFHUNG | SMTO_BLOCK | SMTO_ERRORONEXIT,
+            IME_QUERY_TIMEOUT_MS,
+            Some(&mut result),
+        )
+    };
+    (succeeded.0 != 0).then_some(result)
+}
+
+fn read_ime_mode(mut query: impl FnMut(usize) -> Option<usize>) -> Option<ImeMode> {
+    // Conversion flags can retain the last native mode while the IME is closed.
+    if query(IMC_GETOPENSTATUS)? == 0 {
+        return Some(ImeMode::English);
+    }
+    let conversion_mode = query(IMC_GETCONVERSIONMODE)?;
+    Some(if conversion_mode & IME_CMODE_NATIVE.0 as usize != 0 {
+        ImeMode::Korean
+    } else {
+        ImeMode::English
+    })
+}
 
 /// 탐정 1단계: 지금 사용자가 글을 쓰고 있는(가장 맨 앞에 활성화된) 창이 누구인지 찾아냅니다.
 fn get_focused_window() -> Option<HWND> {
@@ -62,25 +95,67 @@ pub fn get_ime_mode() -> ImeMode {
     };
 
     unsafe {
-        // Get the default IME window for the target window
+        // Query the target thread, not this indicator's keyboard layout. A
+        // non-Korean layout must not inherit a stale native conversion flag.
+        let thread_id = GetWindowThreadProcessId(hwnd, None);
+        if thread_id == 0 {
+            return ImeMode::English;
+        }
+        let layout = GetKeyboardLayout(thread_id);
+        if layout.0 as usize & 0x03ff != LANG_KOREAN {
+            return ImeMode::English;
+        }
+
+        // Get the default IME window for the target window.
         let ime_wnd = ImmGetDefaultIMEWnd(hwnd);
         if ime_wnd.0.is_null() {
             return ImeMode::English;
         }
 
-        // Send WM_IME_CONTROL with IMC_GETCONVERSIONMODE to query conversion mode
-        let conversion_mode = SendMessageW(
-            ime_wnd,
-            WM_IME_CONTROL,
-            Some(WPARAM(IMC_GETCONVERSIONMODE)),
-            Some(LPARAM(0)),
-        );
+        read_ime_mode(|command| query_ime(ime_wnd, command)).unwrap_or(ImeMode::English)
+    }
+}
 
-        // Check IME_CMODE_NATIVE flag
-        if conversion_mode.0 & IME_CMODE_NATIVE != 0 {
-            ImeMode::Korean
-        } else {
-            ImeMode::English
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn closed_ime_does_not_use_stale_conversion_flags() {
+        assert_eq!(
+            read_ime_mode(|command| {
+                assert_eq!(command, IMC_GETOPENSTATUS);
+                Some(0)
+            }),
+            Some(ImeMode::English)
+        );
+    }
+
+    #[test]
+    fn open_ime_distinguishes_native_and_alphanumeric_modes() {
+        for (flags, expected) in [
+            (0, ImeMode::English),
+            (8, ImeMode::English),
+            (1, ImeMode::Korean),
+            (9, ImeMode::Korean),
+        ] {
+            assert_eq!(
+                read_ime_mode(|command| Some(if command == IMC_GETOPENSTATUS {
+                    1
+                } else {
+                    flags
+                })),
+                Some(expected)
+            );
         }
+    }
+
+    #[test]
+    fn failed_queries_are_not_successful_english_responses() {
+        assert_eq!(read_ime_mode(|_| None), None);
+        assert_eq!(
+            read_ime_mode(|command| (command == IMC_GETOPENSTATUS).then_some(1)),
+            None
+        );
     }
 }

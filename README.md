@@ -1,8 +1,8 @@
-# 한/영 입력 표시기 — Walkthrough
+# HanEngCursor — 한/영 입력 표시기
 
 ## What Was Built
 
-마우스 커서 옆에 현재 한/영 입력 상태를 실시간으로 표시하는 Windows 11 시스템 유틸리티.
+마우스 커서 옆에 현재 한/영 입력 상태를 실시간으로 표시하는 Windows 10/11 시스템 유틸리티.
 
 | 항목 | 내용 |
 |------|------|
@@ -47,14 +47,14 @@ Win11Mouse/
 ## How To Run
 
 ```powershell
-cd c:\Users\sam\Dropbox\Win11Mouse
-cargo run --release
+# 저장소 루트에서 실행
+cargo run --release --target-dir target
 ```
 
 또는 빌드 후 직접 실행:
 
 ```powershell
-.\target\release\win11mouse.exe
+.\target\release\HanEngCursor.exe
 ```
 
 종료: 시스템 트레이 아이콘 **우클릭** → **종료**

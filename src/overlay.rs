@@ -30,7 +30,7 @@ const OVERLAY_HEIGHT: i32 = 24;
 const OVERLAY_OFFSET_X: i32 = 20;
 const OVERLAY_OFFSET_Y: i32 = 0;
 
-const CLASS_NAME: windows::core::PCWSTR = w!("Win11MouseOverlay");
+const CLASS_NAME: windows::core::PCWSTR = w!("HanEngCursorOverlay");
 
 /// State stored for the overlay
 static mut CURRENT_MODE: ImeMode = ImeMode::English;

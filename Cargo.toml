@@ -1,8 +1,12 @@
 [package]
-name = "win11mouse"
-version = "0.1.0"
+name = "hanengcursor"
+version = "0.2.0"
 edition = "2021"
-description = "Windows 11 Korean/English IME input indicator next to mouse cursor"
+description = "Windows 10/11 Korean/English IME input indicator next to mouse cursor"
+
+[[bin]]
+name = "HanEngCursor"
+path = "src/main.rs"
 
 [dependencies.windows]
 version = "0.62"
@@ -13,6 +17,8 @@ features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
+    "Win32_UI_Accessibility",
+    "Win32_System_Com",
     "Win32_System_LibraryLoader",
 ]
 

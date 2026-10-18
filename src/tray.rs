@@ -41,8 +41,8 @@ impl TrayIcon {
                 ..Default::default()
             };
 
-            // Set tooltip text "한/영 표시기"
-            let tip = "한/영 표시기";
+            // Show the app name and purpose in the tray tooltip.
+            let tip = "HanEngCursor — 한/영 표시기";
             let tip_utf16: Vec<u16> = tip.encode_utf16().collect();
             let len = tip_utf16.len().min(nid.szTip.len() - 1);
             nid.szTip[..len].copy_from_slice(&tip_utf16[..len]);
