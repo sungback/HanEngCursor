@@ -1,143 +1,178 @@
 use crate::ime::ImeMode;
-use windows::core::w;
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use std::time::{Duration, Instant};
+use windows::core::{w, Error, Result};
+use windows::Win32::Foundation::{
+    GetLastError, SetLastError, HWND, LPARAM, POINT, WIN32_ERROR, WPARAM,
+};
 use windows::Win32::UI::Shell::{
     Shell_NotifyIconW, NIF_ICON, NIF_MESSAGE, NIF_TIP, NIM_ADD, NIM_DELETE, NIM_MODIFY,
-    NOTIFYICONDATAW,
+    NOTIFYICONDATAW, NOTIFY_ICON_MESSAGE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, DestroyIcon, DestroyMenu, GetCursorPos, PostMessageW,
-    SetForegroundWindow, TrackPopupMenu, HICON, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN,
-    WM_COMMAND, WM_USER,
+    AppendMenuW, CreatePopupMenu, DestroyMenu, GetCursorPos, PostMessageW, SetForegroundWindow,
+    TrackPopupMenu, HICON, HMENU, MF_STRING, TPM_BOTTOMALIGN, TPM_LEFTALIGN, TPM_NONOTIFY,
+    TPM_RETURNCMD, WM_COMMAND, WM_NULL, WM_USER,
 };
 
 pub const WM_TRAY_CALLBACK: u32 = WM_USER + 1;
-const IDM_EXIT: u32 = 1001;
+pub const IDM_EXIT: u32 = 1001;
 
 pub struct TrayIcon {
     nid: NOTIFYICONDATAW,
+    // Loaded with LR_SHARED: owned by Windows, never passed to DestroyIcon.
     hicon_en: HICON,
     hicon_ko: HICON,
-    hicon_init: HICON,
-    initialized: bool,
+    registration: Registration,
 }
 
 impl TrayIcon {
-    /// 이모지 공장장 - 처음 프로그램이 켜지면 딱 한 번 실행됩니다.
-    pub fn new(hwnd: HWND) -> windows::core::Result<Self> {
+    pub fn new(hwnd: HWND) -> Result<Self> {
         unsafe {
-            // 리소스에 포함된 국기 및 키보드 아이콘을 불러옵니다.
             let hicon_ko = load_icon_from_resource(201)?;
             let hicon_en = load_icon_from_resource(202)?;
-            let hicon_init = load_icon_from_resource(203)?;
-
             let mut nid = NOTIFYICONDATAW {
                 cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
                 hWnd: hwnd,
                 uID: 1,
                 uFlags: NIF_ICON | NIF_MESSAGE | NIF_TIP,
                 uCallbackMessage: WM_TRAY_CALLBACK,
-                hIcon: hicon_init, // 처음엔 키보드 보여주기
+                hIcon: load_icon_from_resource(203)?,
                 ..Default::default()
             };
-
-            // Show the app name and purpose in the tray tooltip.
-            let tip = "HanEngCursor — 한/영 표시기";
-            let tip_utf16: Vec<u16> = tip.encode_utf16().collect();
-            let len = tip_utf16.len().min(nid.szTip.len() - 1);
-            nid.szTip[..len].copy_from_slice(&tip_utf16[..len]);
-            nid.szTip[len] = 0;
-
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
-
-            Ok(TrayIcon {
+            let tip: Vec<u16> = "HanEngCursor — 한/영 표시기".encode_utf16().collect();
+            let len = tip.len().min(nid.szTip.len() - 1);
+            nid.szTip[..len].copy_from_slice(&tip[..len]);
+            let mut tray = Self {
                 nid,
                 hicon_en,
                 hicon_ko,
-                hicon_init,
-                initialized: false,
-            })
-        }
-    }
-
-    /// 지휘관(main.rs)이 보내는 신호에 따라 시스템 트레이(우측 하단)의 아이콘 도장을 바꿔치기 합니다.
-    pub fn update_icon(&mut self, mode: ImeMode) {
-        unsafe {
-            let icon = match mode {
-                ImeMode::English => self.hicon_en,
-                ImeMode::Korean => self.hicon_ko,
+                registration: Registration::new(Instant::now()),
             };
-
-            // 초기화된 이후에는 항상 모드에 맞는 아이콘으로 변경,
-            // (만약 초기화 전이라도 아이콘이 다르면 변경, 여기서는 바로 아이콘 변경을 위해)
-            if self.nid.hIcon != icon || !self.initialized {
-                self.nid.hIcon = icon;
-                let _ = Shell_NotifyIconW(NIM_MODIFY, &self.nid);
-                self.initialized = true;
-            }
+            tray.sync(Instant::now());
+            Ok(tray)
         }
     }
 
-    /// Show context menu on right click
-    pub fn show_context_menu(&self) {
-        unsafe {
-            let hmenu = CreatePopupMenu().unwrap();
-            let _ = AppendMenuW(hmenu, MF_STRING, IDM_EXIT as usize, w!("종료(&X)"));
-
-            let mut pt = POINT::default();
-            let _ = GetCursorPos(&mut pt);
-
-            // Required to make the menu disappear when clicking elsewhere
-            let _ = SetForegroundWindow(self.nid.hWnd);
-
-            let _ = TrackPopupMenu(
-                hmenu,
-                TPM_LEFTALIGN | TPM_BOTTOMALIGN,
-                pt.x,
-                pt.y,
-                None,
-                self.nid.hWnd,
-                None,
-            );
-
-            let _ = DestroyMenu(hmenu);
-        }
+    pub fn update_icon(&mut self, mode: ImeMode) {
+        self.nid.hIcon = match mode {
+            ImeMode::English => self.hicon_en,
+            ImeMode::Korean => self.hicon_ko,
+        };
+        self.sync(Instant::now());
     }
 
-    /// Handle WM_COMMAND from the tray menu
-    #[allow(dead_code)]
-    pub fn handle_command(wparam: WPARAM) -> bool {
-        let cmd = (wparam.0 & 0xFFFF) as u32;
-        if cmd == IDM_EXIT {
-            unsafe {
-                let _ = PostMessageW(None, WM_COMMAND, WPARAM(IDM_EXIT as usize), LPARAM(0));
-            }
-            return true;
-        }
-        false
+    pub fn taskbar_created(&mut self) {
+        self.registration = Registration::new(Instant::now());
+    }
+
+    fn sync(&mut self, now: Instant) {
+        let nid = &self.nid;
+        self.registration.sync(nid.hIcon, now, |message| unsafe {
+            Shell_NotifyIconW(message, nid).as_bool()
+        });
     }
 }
 
+// Shell availability is transient. Retry at most once a second, and periodically
+// probe an unchanged icon in case a TaskbarCreated broadcast was missed.
+struct Registration {
+    published: Option<HICON>,
+    retry_at: Instant,
+    probe_at: Instant,
+}
+
+impl Registration {
+    fn new(now: Instant) -> Self {
+        Self {
+            published: None,
+            retry_at: now,
+            probe_at: now,
+        }
+    }
+
+    fn sync(
+        &mut self,
+        icon: HICON,
+        now: Instant,
+        mut notify: impl FnMut(NOTIFY_ICON_MESSAGE) -> bool,
+    ) {
+        if now < self.retry_at || (self.published == Some(icon) && now < self.probe_at) {
+            return;
+        }
+        let (first, fallback) = if self.published.is_some() {
+            (NIM_MODIFY, NIM_ADD)
+        } else {
+            (NIM_ADD, NIM_MODIFY)
+        };
+        if notify(first) || notify(fallback) {
+            self.published = Some(icon);
+            self.retry_at = now;
+            self.probe_at = now + Duration::from_secs(5);
+        } else {
+            self.published = None;
+            self.retry_at = now + Duration::from_secs(1);
+        }
+    }
+}
 impl Drop for TrayIcon {
     fn drop(&mut self) {
+        // Best-effort cleanup: the shell might already have removed the icon.
         unsafe {
             let _ = Shell_NotifyIconW(NIM_DELETE, &self.nid);
-            let _ = DestroyIcon(self.hicon_en);
-            let _ = DestroyIcon(self.hicon_ko);
-            let _ = DestroyIcon(self.hicon_init);
         }
     }
 }
 
-unsafe fn load_icon_from_resource(id: u16) -> windows::core::Result<HICON> {
+struct PopupMenu(HMENU);
+
+impl Drop for PopupMenu {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = DestroyMenu(self.0);
+        }
+    }
+}
+
+/// Receives a value instead of borrowing app state across a nested message loop.
+pub fn show_context_menu(hwnd: HWND) -> Result<()> {
+    unsafe {
+        let menu = PopupMenu(CreatePopupMenu()?);
+        AppendMenuW(menu.0, MF_STRING, IDM_EXIT as usize, w!("종료(&X)"))?;
+        let mut pt = POINT::default();
+        GetCursorPos(&mut pt)?;
+        // Foreground activation may be denied by Windows; the menu still works.
+        let _ = SetForegroundWindow(hwnd);
+        SetLastError(WIN32_ERROR(0));
+        let command = TrackPopupMenu(
+            menu.0,
+            TPM_LEFTALIGN | TPM_BOTTOMALIGN | TPM_RETURNCMD | TPM_NONOTIFY,
+            pt.x,
+            pt.y,
+            None,
+            hwnd,
+            None,
+        )
+        .0 as u32;
+        if command == 0 && GetLastError() != WIN32_ERROR(0) {
+            return Err(Error::from_thread());
+        }
+        // Restore normal dismissal behavior after TrackPopupMenu.
+        PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0))?;
+        if command != 0 {
+            PostMessageW(Some(hwnd), WM_COMMAND, WPARAM(command as usize), LPARAM(0))?;
+        }
+        Ok(())
+    }
+}
+
+unsafe fn load_icon_from_resource(id: u16) -> Result<HICON> {
     use windows::core::PCWSTR;
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::UI::WindowsAndMessaging::{
         LoadImageW, IMAGE_ICON, LR_DEFAULTSIZE, LR_SHARED,
     };
-
     let hinstance = GetModuleHandleW(None)?;
-    let hicon = LoadImageW(
+    let icon = LoadImageW(
         Some(hinstance.into()),
         PCWSTR(id as *const u16),
         IMAGE_ICON,
@@ -145,6 +180,65 @@ unsafe fn load_icon_from_resource(id: u16) -> windows::core::Result<HICON> {
         0,
         LR_DEFAULTSIZE | LR_SHARED,
     )?;
+    Ok(HICON(icon.0))
+}
 
-    Ok(HICON(hicon.0))
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unavailable_shell_is_throttled_and_recovers_with_latest_mode() {
+        let now = Instant::now();
+        let mut tokens = [0u8; 2];
+        let english = HICON(tokens.as_mut_ptr().cast());
+        let korean = HICON(tokens.as_mut_ptr().wrapping_add(1).cast());
+        let mut state = Registration::new(now);
+        let mut calls = Vec::new();
+        state.sync(english, now, |message| {
+            calls.push(message);
+            false
+        });
+        assert_eq!(calls, [NIM_ADD, NIM_MODIFY]);
+        state.sync(korean, now + Duration::from_millis(50), |_| {
+            panic!("retry too soon")
+        });
+        state.sync(korean, now + Duration::from_secs(1), |message| {
+            assert_eq!(message, NIM_ADD);
+            true
+        });
+        assert_eq!(state.published, Some(korean));
+    }
+
+    #[test]
+    fn unchanged_icon_is_probed_and_readded_if_registration_disappears() {
+        let now = Instant::now();
+        let icon = HICON(std::ptr::dangling_mut());
+        let mut state = Registration::new(now);
+        state.sync(icon, now, |_| true);
+        state.sync(icon, now + Duration::from_secs(4), |_| {
+            panic!("probe too soon")
+        });
+        let mut calls = Vec::new();
+        state.sync(icon, now + Duration::from_secs(5), |message| {
+            calls.push(message);
+            message == NIM_ADD
+        });
+        assert_eq!(calls, [NIM_MODIFY, NIM_ADD]);
+        assert_eq!(state.published, Some(icon));
+    }
+
+    #[test]
+    fn repeated_taskbar_broadcast_can_update_an_existing_registration() {
+        let now = Instant::now();
+        let icon = HICON(std::ptr::dangling_mut());
+        let mut state = Registration::new(now);
+        let mut calls = Vec::new();
+        state.sync(icon, now, |message| {
+            calls.push(message);
+            message == NIM_MODIFY
+        });
+        assert_eq!(calls, [NIM_ADD, NIM_MODIFY]);
+        assert_eq!(state.published, Some(icon));
+    }
 }

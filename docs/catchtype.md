@@ -37,9 +37,10 @@ Windows 11에서는 이름이 `Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 �
 ```powershell
 cargo run --example catchtype_probe --target-dir target
 cargo run --example catchtype_probe --target-dir target -- --watch
+cargo run --example catchtype_probe --target-dir target -- --monitor --seconds 60
 ```
 
-`--watch`는 60초 동안 상태가 달라질 때만 출력합니다. 일반 사용자 데스크톱에서 실행해야 하며, 격리된 실행 환경에서는 작업 표시줄을 찾지 못할 수 있습니다.
+`--watch`는 기본 60초 동안 상태가 달라질 때만 출력합니다. `--monitor`는 캐시된 CatchType 상태, Windows IME, Caps Lock 상태를 함께 출력하며, `--seconds`로 관측 시간을 지정할 수 있습니다. 입력 내용이나 창 제목은 출력하지 않습니다. 일반 사용자 데스크톱에서 실행해야 하며, 격리된 실행 환경에서는 작업 표시줄을 찾지 못할 수 있습니다.
 
 예상 출력:
 
@@ -47,4 +48,4 @@ cargo run --example catchtype_probe --target-dir target -- --watch
 status=Some(Korean) labels=["Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 · 한글 (가)"]
 ```
 
-CatchType 0.3.0-beta.9.1과 현재 PC에서 위 접근성 이름의 실제 조회를 확인했습니다. 아이콘은 문구와 관계없이 `Catchtype`으로 시작하는 이름으로 찾으므로, 문구가 또 바뀌면 진단 출력의 `labels`에 새 문구가 그대로 보입니다. 전용 한영 키를 통한 양방향 전환, 자동 언어 전환, 비활성 상태 전환의 전체 실사용 검증은 아직 완료되지 않았습니다. CatchType이나 Windows 업데이트로 접근성 이름이 바뀌면 추가 대응이 필요할 수 있습니다.
+CatchType 0.3.0-beta.9.1과 현재 PC에서 위 접근성 이름의 실제 조회를 확인했습니다. 아이콘은 문구와 관계없이 `Catchtype`으로 시작하는 이름으로 찾으므로, 문구가 또 바뀌면 진단 출력의 `labels`에 새 문구가 그대로 보입니다. 2026-10-24 사용자 확인으로 메모장·VS Code·Chrome의 실제 한영 양방향 전환을 확인했고, 자동 조작으로 CatchType 꺼짐 시 Windows IME로 복귀하는 동작을 확인했습니다. 자동 언어 전환·일시 중지·로고 아이콘 상태의 전체 검증은 남아 있습니다. 자세한 범위는 [검증 기록](validation.md)을 참조하세요. CatchType이나 Windows 업데이트로 접근성 이름이 바뀌면 추가 대응이 필요할 수 있습니다.

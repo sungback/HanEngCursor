@@ -1,6 +1,6 @@
 [package]
 name = "hanengcursor"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 description = "Windows 10/11 Korean/English IME input indicator next to mouse cursor"
 
@@ -18,6 +18,7 @@ features = [
     "Win32_Graphics_Gdi",
     "Win32_UI_Shell",
     "Win32_UI_Accessibility",
+    "Win32_UI_HiDpi",
     "Win32_System_Com",
     "Win32_System_LibraryLoader",
 ]

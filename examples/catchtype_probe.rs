@@ -17,14 +17,32 @@ fn main() -> windows::core::Result<()> {
 }
 
 fn probe() -> windows::core::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    let seconds = args
+        .windows(2)
+        .find(|pair| pair[0] == "--seconds")
+        .and_then(|pair| pair[1].parse::<u64>().ok())
+        .unwrap_or(60);
     if std::env::args().any(|arg| arg == "--monitor") {
-        let _monitor = catchtype::Monitor::start().expect("start status monitor");
+        let monitor = catchtype::Monitor::start().expect("start status monitor");
         let started = Instant::now();
         let mut previous = None;
-        while started.elapsed() < Duration::from_secs(60) {
-            let current = (catchtype::current_status(), ime::get_ime_mode());
+        while started.elapsed() < Duration::from_secs(seconds) {
+            let caps = unsafe {
+                windows::Win32::UI::Input::KeyboardAndMouse::GetKeyState(
+                    windows::Win32::UI::Input::KeyboardAndMouse::VK_CAPITAL.0 as i32,
+                ) & 1
+                    != 0
+            };
+            let current = (monitor.current_status(), ime::get_ime_mode(), caps);
             if previous != Some(current) {
-                println!("t={}ms monitor={:?} ime={:?}", started.elapsed().as_millis(), current.0, current.1);
+                println!(
+                    "t={}ms monitor={:?} ime={:?} caps={}",
+                    started.elapsed().as_millis(),
+                    current.0,
+                    current.1,
+                    current.2
+                );
                 previous = Some(current);
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -51,7 +69,7 @@ fn probe() -> windows::core::Result<()> {
             }
             previous = Some(current);
         }
-        if !watch || started.elapsed() >= Duration::from_secs(60) {
+        if !watch || started.elapsed() >= Duration::from_secs(seconds) {
             break;
         }
         std::thread::sleep(Duration::from_millis(100));

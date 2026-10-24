@@ -2,123 +2,177 @@
 
 mod catchtype;
 mod ime;
+mod layout;
 mod overlay;
 mod tray;
+mod window;
 
-use windows::core::{w, HSTRING};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use overlay::Overlay;
+use std::cell::{Cell, RefCell};
+use tray::{TrayIcon, IDM_EXIT, WM_TRAY_CALLBACK};
+use window::OwnedWindow;
+use windows::core::{w, Error, Result, HSTRING};
+use windows::Win32::Foundation::{ERROR_CLASS_ALREADY_EXISTS, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer,
-    PostQuitMessage, RegisterClassW, SetTimer, TranslateMessage, CS_HREDRAW, CS_VREDRAW,
-    CW_USEDEFAULT, MSG, WM_COMMAND, WM_DESTROY, WM_LBUTTONUP, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW,
+    GetWindowLongPtrW, KillTimer, PostMessageW, PostQuitMessage, RegisterClassW,
+    RegisterWindowMessageW, SetTimer, SetWindowLongPtrW, TranslateMessage, GWLP_USERDATA, MSG,
+    WM_CLOSE, WM_COMMAND, WM_DESTROY, WM_NCDESTROY, WM_RBUTTONUP, WM_TIMER, WNDCLASSW,
     WS_EX_TOOLWINDOW, WS_OVERLAPPEDWINDOW,
 };
 
-use crate::overlay::Overlay;
-use crate::tray::{TrayIcon, WM_TRAY_CALLBACK};
-
-// 1초에 20번 (50ms 마다) 상태를 체크하기 위한 타이머 설정값
 const TIMER_ID: usize = 1;
 const TIMER_INTERVAL_MS: u32 = 50;
 const CLASS_NAME: windows::core::PCWSTR = w!("HanEngCursorMainWnd");
 
-// 프로그램 전역에 상태를 저장하는 공간 (오버레이 마술사창, 트레이 팩토리)
-// *주의: Rust에서 전역 변수는 `unsafe` 블록 안에서만 안전성을 개발자가 책임지고 써야 합니다.
-static mut OVERLAY: Option<Overlay> = None;
-static mut TRAY: Option<TrayIcon> = None;
+struct App {
+    // Destroy the window before freeing anything its callback can access.
+    window: OwnedWindow,
+    overlay: Overlay,
+    tray: RefCell<TrayIcon>,
+    error: RefCell<Option<Error>>,
+    updating: Cell<bool>,
+    catchtype: Option<catchtype::Monitor>,
+    taskbar_created: u32,
+    tray_reset: Cell<bool>,
+}
 
-/// 프로그램의 심장 (지휘관) - 가장 먼저 실행되는 함수입니다.
-fn main() {
-    if let Err(e) = run() {
-        unsafe {
-            let msg = HSTRING::from(format!("앱 시작 실패:\n{:?}", e));
-            windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
-                None,
-                &msg,
-                w!("HanEngCursor 오류"),
-                windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
-            );
+impl App {
+    fn update(&self) -> Result<()> {
+        // Win32 calls can pump nested messages. Never borrow the tray twice.
+        if self.updating.replace(true) {
+            return Ok(());
+        }
+        let result = (|| {
+            let mode = match self
+                .catchtype
+                .as_ref()
+                .and_then(catchtype::Monitor::current_status)
+            {
+                Some(catchtype::Status::Korean) => ime::ImeMode::Korean,
+                Some(catchtype::Status::English) => ime::ImeMode::English,
+                _ => ime::get_ime_mode(),
+            };
+            self.overlay.update(mode)?;
+            let mut tray = self.tray.borrow_mut();
+            if self.tray_reset.replace(false) {
+                tray.taskbar_created();
+            }
+            tray.update_icon(mode);
+            Ok(())
+        })();
+        self.updating.set(false);
+        result
+    }
+
+    fn fail(&self, error: Error) {
+        let mut stored = self.error.borrow_mut();
+        if stored.is_none() {
+            *stored = Some(error);
+            // Show errors only after dispatch and resource cleanup have finished.
+            unsafe { PostQuitMessage(1) };
         }
     }
 }
 
-fn run() -> windows::core::Result<()> {
-    // Accessibility work runs independently from the cursor/message loop.
-    // If the optional monitor cannot start, Windows IME detection still works.
-    let _catchtype_monitor = catchtype::Monitor::start().ok();
+fn main() -> std::process::ExitCode {
+    if let Err(error) = run() {
+        unsafe {
+            let message = HSTRING::from(format!(
+                "HanEngCursor 실행 중 오류가 발생했습니다.\n{error}"
+            ));
+            windows::Win32::UI::WindowsAndMessaging::MessageBoxW(
+                None,
+                &message,
+                w!("HanEngCursor 오류"),
+                windows::Win32::UI::WindowsAndMessaging::MB_ICONERROR,
+            );
+        }
+        return std::process::ExitCode::FAILURE;
+    }
+    std::process::ExitCode::SUCCESS
+}
+
+fn run() -> Result<()> {
+    // Optional integration: IME detection remains available if it cannot start.
+    let catchtype = catchtype::Monitor::start().ok();
+    let app = create_app(catchtype)?;
+    unsafe {
+        if SetTimer(Some(app.window.0), TIMER_ID, TIMER_INTERVAL_MS, None) == 0 {
+            return Err(Error::from_thread());
+        }
+        let result = message_loop();
+        let _ = KillTimer(Some(app.window.0), TIMER_ID);
+        if let Some(error) = app.error.borrow_mut().take() {
+            return Err(error);
+        }
+        result
+    }
+}
+
+fn create_app(catchtype: Option<catchtype::Monitor>) -> Result<Box<App>> {
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
-
-        // 1. 눈에 보이지 않는 "유령 창(Message-only window)"의 등록증을 만듭니다.
-        // 이 창은 화면에는 보이지 않지만, 윈도우 시스템과 통신하며 타이머 신호를 받는 지휘소 역할을 합니다.
+        let taskbar_created = RegisterWindowMessageW(w!("TaskbarCreated"));
+        if taskbar_created == 0 {
+            return Err(Error::from_thread());
+        }
         let wc = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(main_wnd_proc),
             hInstance: hinstance.into(),
             lpszClassName: CLASS_NAME,
             ..Default::default()
         };
-        RegisterClassW(&wc);
-
-        // 2. 등록증을 바탕으로 실제 유령 창을 생성합니다.
-        let hwnd = CreateWindowExW(
+        if RegisterClassW(&wc) == 0 {
+            let error = Error::from_thread();
+            if error.code() != ERROR_CLASS_ALREADY_EXISTS.to_hresult() {
+                return Err(error);
+            }
+        }
+        let window = OwnedWindow(CreateWindowExW(
             WS_EX_TOOLWINDOW,
             CLASS_NAME,
             w!("HanEngCursor"),
             WS_OVERLAPPEDWINDOW,
-            CW_USEDEFAULT,
-            CW_USEDEFAULT,
+            0,
+            0,
             0,
             0,
             None,
             None,
             Some(hinstance.into()),
             None,
-        )?;
+        )?);
+        let overlay = Overlay::new()?;
+        let tray = TrayIcon::new(window.0)?;
+        let app = Box::new(App {
+            window,
+            overlay,
+            tray: RefCell::new(tray),
+            error: RefCell::new(None),
+            updating: Cell::new(false),
+            catchtype,
+            taskbar_created,
+            tray_reset: Cell::new(false),
+        });
+        // The Box stays alive throughout dispatch and window destruction.
+        app.window.attach(app.as_ref())?;
+        Ok(app)
+    }
+}
 
-        // Initialize overlay
-        let overlay_result = Overlay::new();
-        match overlay_result {
-            Ok(o) => {
-                OVERLAY = Some(o);
-            }
-            Err(e) => {
-                eprintln!("Failed to create overlay: {:?}", e);
-                return Err(e);
+unsafe fn message_loop() -> Result<()> {
+    let mut msg = MSG::default();
+    loop {
+        match GetMessageW(&mut msg, None, 0, 0).0 {
+            -1 => return Err(Error::from_thread()),
+            0 => return Ok(()),
+            _ => {
+                let _ = TranslateMessage(&msg);
+                DispatchMessageW(&msg);
             }
         }
-
-        // Initialize tray icon
-        let tray_result = TrayIcon::new(hwnd);
-        match tray_result {
-            Ok(t) => {
-                TRAY = Some(t);
-            }
-            Err(e) => {
-                eprintln!("Failed to create tray icon: {:?}", e);
-                return Err(e);
-            }
-        }
-
-        // 5. 지휘관의 핵심: 50ms마다 알람(타이머)이 울리도록 설정합니다.
-        // "WM_TIMER" 라는 메시지가 50ms 마다 날아오게 됩니다.
-        SetTimer(Some(hwnd), TIMER_ID, TIMER_INTERVAL_MS, None);
-
-        // 6. 무한 루프 (메시지 루프)
-        // 프로그램이 바로 꺼지지 않고 계속 실행되면서 윈도우에서 오는 우편물(클릭, 타이머 알람 등)을 받아 처리합니다.
-        let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).into() {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-
-        // Cleanup (window already destroyed, ignore KillTimer error)
-        let _ = KillTimer(Some(hwnd), TIMER_ID);
-        TRAY = None;
-        OVERLAY = None;
-
-        Ok(())
     }
 }
 
@@ -128,51 +182,144 @@ unsafe extern "system" fn main_wnd_proc(
     wparam: WPARAM,
     lparam: LPARAM,
 ) -> LRESULT {
+    // Only shared references cross Win32 calls; mutations use UI-thread cells.
+    let state = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *const App;
+    if !state.is_null() && msg == (&*state).taskbar_created {
+        // Shell calls may reenter while the tray is borrowed by update().
+        (&*state).tray_reset.set(true);
+        return LRESULT(0);
+    }
     match msg {
-        WM_TIMER => {
-            if wparam.0 == TIMER_ID {
-                // Poll IME status and update overlay & tray
-                let mode = match catchtype::current_status() {
-                    Some(catchtype::Status::Korean) => ime::ImeMode::Korean,
-                    Some(catchtype::Status::English) => ime::ImeMode::English,
-                    _ => ime::get_ime_mode(),
-                };
-                if let Some(ref overlay) = OVERLAY {
-                    overlay.update(mode);
-                }
-                if let Some(ref mut tray) = TRAY {
-                    tray.update_icon(mode);
+        WM_TIMER if wparam.0 == TIMER_ID && !state.is_null() => {
+            let app = &*state;
+            if let Err(error) = app.update() {
+                app.fail(error);
+            }
+            LRESULT(0)
+        }
+        WM_TRAY_CALLBACK if (lparam.0 & 0xFFFF) as u32 == WM_RBUTTONUP => {
+            // The modal menu receives a copied HWND, never a borrowed TrayIcon.
+            if let Err(error) = tray::show_context_menu(hwnd) {
+                if !state.is_null() {
+                    (&*state).fail(error);
                 }
             }
             LRESULT(0)
         }
-        WM_TRAY_CALLBACK => {
-            let event = (lparam.0 & 0xFFFF) as u32;
-            match event {
-                WM_RBUTTONUP => {
-                    if let Some(ref tray_icon) = TRAY {
-                        tray_icon.show_context_menu();
-                    }
+        WM_COMMAND if (wparam.0 & 0xFFFF) as u32 == IDM_EXIT => {
+            if let Err(error) = PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) {
+                if !state.is_null() {
+                    (&*state).fail(error);
                 }
-                WM_LBUTTONUP => {
-                    // Left click on tray — could toggle visibility in the future
-                }
-                _ => {}
             }
             LRESULT(0)
         }
-        WM_COMMAND => {
-            let cmd = (wparam.0 & 0xFFFF) as u32;
-            if cmd == 1001 {
-                // IDM_EXIT
-                let _ = DestroyWindow(hwnd);
+        WM_CLOSE => {
+            if let Err(error) = DestroyWindow(hwnd) {
+                if !state.is_null() {
+                    (&*state).fail(error);
+                }
             }
             LRESULT(0)
         }
         WM_DESTROY => {
-            PostQuitMessage(0);
+            let _ = KillTimer(Some(hwnd), TIMER_ID);
+            // OwnedWindow detaches before cleanup. Only a live application's
+            // external close should quit; error cleanup must not leave WM_QUIT
+            // queued ahead of the error dialog.
+            if !state.is_null() {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
+        WM_NCDESTROY => {
+            SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::UI::WindowsAndMessaging::{IsWindow, PeekMessageW, PM_REMOVE, WM_QUIT};
+
+    #[test]
+    #[ignore = "requires an interactive Windows desktop with Explorer"]
+    fn shell_registration_recovers_after_loss_and_repeated_taskbar_messages() {
+        use windows::Win32::UI::Shell::{
+            Shell_NotifyIconW, NIM_DELETE, NIM_MODIFY, NOTIFYICONDATAW,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::SendMessageW;
+        unsafe {
+            let app = create_app(None).expect("initialize app");
+            let hwnd = app.window.0;
+            let nid = NOTIFYICONDATAW {
+                cbSize: std::mem::size_of::<NOTIFYICONDATAW>() as u32,
+                hWnd: hwnd,
+                uID: 1,
+                ..Default::default()
+            };
+            for _ in 0..3 {
+                assert!(Shell_NotifyIconW(NIM_DELETE, &nid).as_bool());
+                SendMessageW(hwnd, app.taskbar_created, None, None);
+                assert!(app.tray_reset.get());
+                SendMessageW(hwnd, WM_TIMER, Some(WPARAM(TIMER_ID)), None);
+                assert!(!app.tray_reset.get());
+                assert!(app.error.borrow().is_none());
+                assert!(
+                    Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool(),
+                    "icon should be registered again"
+                );
+            }
+            // A duplicate broadcast while the icon still exists is idempotent.
+            SendMessageW(hwnd, app.taskbar_created, None, None);
+            SendMessageW(hwnd, WM_TIMER, Some(WPARAM(TIMER_ID)), None);
+            assert!(Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool());
+            drop(app);
+            assert!(!IsWindow(Some(hwnd)).as_bool());
+            assert!(!Shell_NotifyIconW(NIM_MODIFY, &nid).as_bool());
+            let mut message = MSG::default();
+            assert!(!PeekMessageW(&mut message, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool());
+        }
+    }
+
+    #[test]
+    fn initialization_cleanup_destroys_window_without_leaving_quit_message() {
+        unsafe {
+            let hinstance = GetModuleHandleW(None).unwrap();
+            let class = w!("HanEngCursorCleanupTest");
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(main_wnd_proc),
+                hInstance: hinstance.into(),
+                lpszClassName: class,
+                ..Default::default()
+            };
+            assert_ne!(RegisterClassW(&wc), 0);
+            let window = OwnedWindow(
+                CreateWindowExW(
+                    WS_EX_TOOLWINDOW,
+                    class,
+                    w!("cleanup test"),
+                    WS_OVERLAPPEDWINDOW,
+                    0,
+                    0,
+                    0,
+                    0,
+                    None,
+                    None,
+                    Some(hinstance.into()),
+                    None,
+                )
+                .unwrap(),
+            );
+            let hwnd = window.0;
+            // Models a failure before App has been constructed and attached.
+            drop(window);
+            assert!(!IsWindow(Some(hwnd)).as_bool());
+            let mut message = MSG::default();
+            assert!(!PeekMessageW(&mut message, None, WM_QUIT, WM_QUIT, PM_REMOVE).as_bool());
+        }
     }
 }

@@ -25,7 +25,15 @@ const APP_NAME: &str = "Catchtype";
 // Checked before the language words: "보안 입력 때문에 쉬는 중" must not count
 // as a language just because a later wording mentions one.
 const INACTIVE_WORDS: &[&str] = &[
-    "꺼", "쉬", "비밀번호", "보안 입력", "권한", " off", "paused", "password", "secure",
+    "꺼",
+    "쉬",
+    "비밀번호",
+    "보안 입력",
+    "권한",
+    " off",
+    "paused",
+    "password",
+    "secure",
     "permission",
 ];
 const KOREAN_WORDS: &[&str] = &["(가)", "한글", "Korean"];
@@ -155,16 +163,17 @@ struct Sample {
     updated: Instant,
 }
 
-static SAMPLE: Mutex<Option<Sample>> = Mutex::new(None);
-
 pub struct Monitor {
     running: Arc<AtomicBool>,
+    sample: Arc<Mutex<Option<Sample>>>,
 }
 
 impl Monitor {
     pub fn start() -> std::io::Result<Self> {
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
+        let sample = Arc::new(Mutex::new(None));
+        let worker_sample = Arc::clone(&sample);
         std::thread::Builder::new()
             .name("catchtype-status".into())
             .spawn(move || unsafe {
@@ -177,7 +186,7 @@ impl Monitor {
                         let started = Instant::now();
                         let foreground = GetForegroundWindow().0 as usize;
                         let status = reader.read().ok().flatten();
-                        if let Ok(mut sample) = SAMPLE.lock() {
+                        if let Ok(mut sample) = worker_sample.lock() {
                             *sample = Some(Sample {
                                 status,
                                 foreground,
@@ -191,7 +200,7 @@ impl Monitor {
                 }
                 CoUninitialize();
             })?;
-        Ok(Self { running })
+        Ok(Self { running, sample })
     }
 }
 
@@ -202,17 +211,19 @@ impl Drop for Monitor {
     }
 }
 
-pub fn current_status() -> Option<Status> {
-    let sample = SAMPLE.try_lock().ok()?;
-    let sample = sample.as_ref()?;
-    let foreground = unsafe { GetForegroundWindow() }.0 as usize;
-    if foreground == 0
-        || foreground != sample.foreground
-        || sample.updated.elapsed() > Duration::from_millis(750)
-    {
-        return None;
+impl Monitor {
+    pub fn current_status(&self) -> Option<Status> {
+        let sample = self.sample.try_lock().ok()?;
+        let sample = sample.as_ref()?;
+        let foreground = unsafe { GetForegroundWindow() }.0 as usize;
+        if foreground == 0
+            || foreground != sample.foreground
+            || sample.updated.elapsed() > Duration::from_millis(750)
+        {
+            return None;
+        }
+        sample.status
     }
-    sample.status
 }
 
 #[cfg(test)]
@@ -240,15 +251,30 @@ mod tests {
         for (label, expected) in [
             ("Catchtype 켜짐 · 한글 (가)", Status::Korean),
             ("Catchtype 켜짐 · 영어 (A)", Status::English),
-            ("Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 · 한글 (가)", Status::Korean),
-            ("Catchtype 켜짐 · 한글 (가) Catchtype 켜짐 · 영어 (A)", Status::English),
+            (
+                "Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 · 한글 (가)",
+                Status::Korean,
+            ),
+            (
+                "Catchtype 켜짐 · 한글 (가) Catchtype 켜짐 · 영어 (A)",
+                Status::English,
+            ),
             ("Catchtype is on · Korean (가)", Status::Korean),
             ("Catchtype is on · English (A)", Status::English),
-            ("Catchtype 켜짐 · 한글 (가) Catchtype 꺼짐", Status::Inactive),
-            ("Catchtype is off · Turn it on from the menu", Status::Inactive),
+            (
+                "Catchtype 켜짐 · 한글 (가) Catchtype 꺼짐",
+                Status::Inactive,
+            ),
+            (
+                "Catchtype is off · Turn it on from the menu",
+                Status::Inactive,
+            ),
             ("Catchtype is paused", Status::Inactive),
             ("Catchtype이 쉬는 중이에요", Status::Inactive),
-            ("Catchtype 켜짐 · 보안 입력 때문에 쉬는 중", Status::Inactive),
+            (
+                "Catchtype 켜짐 · 보안 입력 때문에 쉬는 중",
+                Status::Inactive,
+            ),
             ("Catchtype: 꺼짐", Status::Inactive),
             // Observed with 0.3.0-beta.9.1.
             (
