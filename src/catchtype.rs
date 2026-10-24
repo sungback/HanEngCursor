@@ -20,18 +20,41 @@ pub enum Status {
     Unknown,
 }
 
+const APP_NAME: &str = "Catchtype";
+
+// Checked before the language words: "보안 입력 때문에 쉬는 중" must not count
+// as a language just because a later wording mentions one.
+const INACTIVE_WORDS: &[&str] = &[
+    "꺼", "쉬", "비밀번호", "보안 입력", "권한", " off", "paused", "password", "secure",
+    "permission",
+];
+const KOREAN_WORDS: &[&str] = &["(가)", "한글", "Korean"];
+const ENGLISH_WORDS: &[&str] = &["(A)", "영어", "English"];
+
+/// Only identifies Catchtype's own icon; the wording after the name is not
+/// required, so a reworded tooltip is still found and can be diagnosed.
+pub fn is_catchtype_label(label: &str) -> bool {
+    label.starts_with(APP_NAME)
+}
+
 pub fn parse_label(label: &str) -> Option<Status> {
     // Windows 11 can prepend the icon's original tooltip to its current tooltip:
-    // "Catchtype: 영어 Catchtype: 한글". Only the last complete label is current.
-    if !label.starts_with("Catchtype:") {
+    // "Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 · 한글 (가)". Only the last
+    // label is current. Older builds used "Catchtype: 한글".
+    if !is_catchtype_label(label) {
         return None;
     }
-    let (_, current) = label.rsplit_once("Catchtype:")?;
-    Some(match current.trim() {
-        "영어" => Status::English,
-        "한글" => Status::Korean,
-        "쉬는 중" | "비밀번호 입력 중" => Status::Inactive,
-        _ => Status::Unknown,
+    let (_, current) = label.rsplit_once(APP_NAME)?;
+    let has = |words: &[&str]| words.iter().any(|word| current.contains(word));
+    Some(if has(INACTIVE_WORDS) {
+        Status::Inactive
+    } else if has(KOREAN_WORDS) {
+        Status::Korean
+    } else if has(ENGLISH_WORDS) {
+        Status::English
+    } else {
+        // Includes "Catchtype 켜짐" from the logo icon style, which hides 한/영.
+        Status::Unknown
     })
 }
 
@@ -76,7 +99,7 @@ impl Reader {
                     let elements = root.FindAll(TreeScope_Descendants, &self.condition)?;
                     for index in 0..elements.Length()? {
                         let element = elements.GetElement(index)?;
-                        if parse_label(&element.CurrentName()?.to_string()).is_some() {
+                        if is_catchtype_label(&element.CurrentName()?.to_string()) {
                             self.icons.push(element);
                         }
                     }
@@ -213,6 +236,45 @@ mod tests {
     }
 
     #[test]
+    fn current_tooltip_wording_is_recognized() {
+        for (label, expected) in [
+            ("Catchtype 켜짐 · 한글 (가)", Status::Korean),
+            ("Catchtype 켜짐 · 영어 (A)", Status::English),
+            ("Catchtype 켜짐 · 영어 (A) Catchtype 켜짐 · 한글 (가)", Status::Korean),
+            ("Catchtype 켜짐 · 한글 (가) Catchtype 켜짐 · 영어 (A)", Status::English),
+            ("Catchtype is on · Korean (가)", Status::Korean),
+            ("Catchtype is on · English (A)", Status::English),
+            ("Catchtype 켜짐 · 한글 (가) Catchtype 꺼짐", Status::Inactive),
+            ("Catchtype is off · Turn it on from the menu", Status::Inactive),
+            ("Catchtype is paused", Status::Inactive),
+            ("Catchtype이 쉬는 중이에요", Status::Inactive),
+            ("Catchtype 켜짐 · 보안 입력 때문에 쉬는 중", Status::Inactive),
+            ("Catchtype: 꺼짐", Status::Inactive),
+            // Observed with 0.3.0-beta.9.1.
+            (
+                "Catchtype 켜짐 · 영어 (A) Catchtype 꺼 둠 · 메뉴나 Ctrl+Alt+W로 켜요",
+                Status::Inactive,
+            ),
+            // The resting tooltip has no app name, so it trails the original one.
+            (
+                "Catchtype 켜짐 · 영어 (A) 글 칸이 아닌 곳(그림판·게임 등)이라 쉬고 있어요",
+                Status::Inactive,
+            ),
+            ("Catchtype 켜짐 · 영어 (A) Catchtype: 영어", Status::English),
+            ("Catchtype: 권한 필요", Status::Inactive),
+            ("Catchtype: 보안 입력 중", Status::Inactive),
+        ] {
+            assert_eq!(parse_label(label), Some(expected), "{label}");
+        }
+    }
+
+    #[test]
+    fn logo_icon_style_has_no_language() {
+        assert_eq!(parse_label("Catchtype 켜짐"), Some(Status::Unknown));
+        assert_eq!(parse_label("Catchtype: 켜짐"), Some(Status::Unknown));
+    }
+
+    #[test]
     fn inactive_and_unrecognized_labels_do_not_force_a_language() {
         assert_eq!(
             parse_label("Catchtype: 비밀번호 입력 중"),
@@ -220,6 +282,6 @@ mod tests {
         );
         assert_eq!(parse_label("Catchtype: unknown"), Some(Status::Unknown));
         assert_eq!(parse_label("Another app: 한글"), None);
-        assert_eq!(parse_label("Catchtype: 영어?"), Some(Status::Unknown));
+        assert_eq!(parse_label("Mem Reduct 한글"), None);
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "hanengcursor"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 description = "Windows 10/11 Korean/English IME input indicator next to mouse cursor"
 
